@@ -1,0 +1,103 @@
+// 【重要】あなた自身のGemini APIキーをここに入力してください
+const GEMINI_API_KEY = 'ここにAPIキーを入力';
+
+function createJobHuntingDraft() {
+  const folderName = "就活";
+  
+  // 1. 「就活」フォルダを取得
+  const folders = DriveApp.getFoldersByName(folderName);
+  if (!folders.hasNext()) {
+    throw new Error(`Googleドライブに「${folderName}」という名前のフォルダが見つかりません。`);
+  }
+  const folder = folders.next();
+  
+  // 2. フォルダ内のファイルを仕分け（求人票PDF と 添付する応募書類）
+  const files = folder.getFiles();
+  let resumePdfBlob = null;
+  let attachments = [];
+  
+  while (files.hasNext()) {
+    let file = files.next();
+    let name = file.getName();
+    
+    // ファイル名に「求人票」が含まれるPDFをOCR対象にする
+    if (name.includes("求人票") && file.getMimeType() === "application/pdf") {
+      resumePdfBlob = file.getBlob();
+    } else {
+      // それ以外のファイル（履歴書や職務経歴書など）をすべて添付ファイルにする
+      attachments.push(file.getBlob());
+    }
+  }
+  
+  if (!resumePdfBlob) {
+    throw new Error("「就活」フォルダの中に、ファイル名に「求人票」とついたPDFファイルが見つかりません。");
+  }
+  
+  // 3. Gemini APIを使って求人票PDFからメールアドレスを抽出（OCR）
+  Logger.log("Gemini APIで求人票の解析を開始します...");
+  const targetEmail = extractEmailWithGemini(resumePdfBlob);
+  
+  if (!targetEmail) {
+    throw new Error("求人票PDFからメールアドレス（@を含む文字列）を検出できませんでした。");
+  }
+  Logger.log(`宛先アドレスを検出しました: ${targetEmail}`);
+  
+  // 4. メール本文の作成（ご指定の仕様）
+  const subject = "【ハローワーク紹介】応募書類ご送付の件（鈴木）"; 
+  const body = `担当者様
+
+お世話になっております。鈴木と申します。
+
+ハローワークよりご紹介いただきました求人を拝見し、ぜひ応募させていただきたくご連絡いたしました。
+ご指定のありました履歴書などの応募書類を添付いたしましたので、ご査収のほどよろしくお願い申し上げます。
+
+面接の機会をいただけますと幸いです。
+何卒よろしくお願い申し上げます。
+
+鈴木`;
+
+  // 5. Gmailの下書きを作成
+  GmailApp.createDraft(targetEmail, subject, body, {
+    attachments: attachments
+  });
+  
+  Logger.log("無事にGmailへ下書きを作成しました！確認してください。");
+}
+
+// Gemini APIにPDFを投げてメールアドレスを抽出させる関数
+function extractEmailWithGemini(pdfBlob) {
+  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+  
+  const base64Data = Utilities.base64Encode(pdfBlob.getBytes());
+  
+  const payload = {
+    contents: [{
+      parts: [
+        {
+          inlineData: {
+            mimeType: "application/pdf",
+            data: base64Data
+          }
+        },
+        {
+          text: "この求人票PDFのテキストをOCR解析し、記載されている企業の担当者連絡先、または応募用のメールアドレス（@が含まれる文字列）を1つだけ見つけて抽出してください。余計な挨拶や解説は一切省き、メールアドレスの文字列だけを返してください。例: info@example.com"
+        }
+      ]
+    }]
+  };
+  
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+  
+  const response = UrlFetchApp.fetch(url, options);
+  const json = JSON.parse(response.getContentText());
+  
+  if (json.candidates && json.candidates[0].content.parts[0].text) {
+    return json.candidates[0].content.parts[0].text.trim();
+  }
+  return null;
+}
